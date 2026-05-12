@@ -1,0 +1,168 @@
+{
+  "version": "1.0.0",
+  "name": "annual_budget_planning_triage",
+  "description": "State and action template for annual budget planning application ticket triage.",
+  "final_state": "human_review",
+  "states": {
+    "intake": {
+      "description": "Normalize the ticket and collect title, description, comments, links, and attachments.",
+      "actions": ["extract_ticket_entities"],
+      "next_states": ["classification"]
+    },
+    "classification": {
+      "description": "Assign a broad primary category and an optional application issue subcategory.",
+      "actions": ["classify_ticket"],
+      "next_states": ["duplicate_check", "required_info_review"]
+    },
+    "duplicate_check": {
+      "description": "Compare the ticket with local historical tickets and identify likely duplicates.",
+      "actions": ["find_similar_tickets"],
+      "next_states": ["required_info_review", "human_review"]
+    },
+    "required_info_review": {
+      "description": "Check required fields for the selected category and subcategory.",
+      "actions": ["evaluate_required_fields"],
+      "next_states": ["action_recommendation"]
+    },
+    "action_recommendation": {
+      "description": "Draft the next human-reviewable action.",
+      "actions": ["recommend_next_action"],
+      "next_states": ["human_review"]
+    },
+    "human_review": {
+      "description": "A human agent reviews and decides whether to apply the recommendation.",
+      "actions": [],
+      "next_states": []
+    }
+  },
+  "primary_categories": {
+    "access_request": {
+      "description": "User asks for app access, role changes, or permission changes.",
+      "required_fields": [
+        {"field": "name", "label": "Name", "prompt": "Please provide the user's full name."},
+        {"field": "ldap", "label": "LDAP", "prompt": "Please provide the user's LDAP."},
+        {"field": "portfolio", "label": "Portfolio", "prompt": "Please provide the relevant portfolio."},
+        {"field": "region", "label": "Region", "prompt": "Please provide the user's region."},
+        {"field": "user_role", "label": "User role", "prompt": "Please provide the requested in-app role."},
+        {"field": "project_type", "label": "Project type", "prompt": "Please provide the project type, such as active or pre-planning."},
+        {"field": "leads", "label": "Leads", "prompt": "Please provide the relevant lead or approver."},
+        {"field": "additional_context", "label": "Additional context", "prompt": "Please provide any additional context needed to grant the appropriate in-app role."}
+      ],
+      "routing_hint": {
+        "team": "app-access-admins",
+        "reason": "Access and role-change requests should be reviewed by app access administrators."
+      },
+      "clarification_style": "Ask for the missing access request fields in a concise checklist."
+    },
+    "application_issue": {
+      "description": "User reports something broken, incorrect, slow, unavailable, or confusing in the app.",
+      "required_fields": [
+        {"field": "portfolio", "label": "Portfolio", "prompt": "Please provide the portfolio."},
+        {"field": "region", "label": "Region", "prompt": "Please provide the region."},
+        {"field": "site", "label": "Site", "prompt": "Please provide the site."},
+        {"field": "project_code", "label": "Project code", "prompt": "Please provide the project code."},
+        {"field": "project_name", "label": "Project name", "prompt": "Please provide the project name."},
+        {"field": "issue_description", "label": "Detailed issue description", "prompt": "Please describe what happened, what you expected, and any specific error or incorrect value."}
+      ],
+      "routing_hint": {
+        "team": "app-support-triage",
+        "reason": "Application issues should be triaged by the application support team."
+      },
+      "clarification_style": "Ask for the missing app context needed to reproduce or investigate the issue."
+    },
+    "feature_request": {
+      "description": "User asks for new app functionality or an enhancement.",
+      "required_fields": [
+        {"field": "requested_capability", "label": "Requested capability", "prompt": "Please describe the new capability or enhancement requested."},
+        {"field": "business_reason", "label": "Business reason", "prompt": "Please explain the business reason or workflow impact."},
+        {"field": "urgency", "label": "Urgency", "prompt": "Please provide the urgency or target timeline."}
+      ],
+      "routing_hint": {
+        "team": "product-owner-review",
+        "reason": "Feature requests should be reviewed by the product owner before engineering sizing."
+      },
+      "clarification_style": "Ask for product impact and urgency rather than implementation details."
+    },
+    "intended_behavior": {
+      "description": "User reports an issue, but triage determines the app is working as designed.",
+      "required_fields": [],
+      "routing_hint": {
+        "team": "app-support-triage",
+        "reason": "Support should explain expected behavior and link documentation when available."
+      },
+      "clarification_style": "Explain the observed behavior and ask whether the user wants a feature request opened."
+    },
+    "duplicate": {
+      "description": "Ticket appears to match an existing known ticket.",
+      "required_fields": [],
+      "routing_hint": {
+        "team": "app-support-triage",
+        "reason": "Potential duplicate closure requires human confirmation."
+      },
+      "clarification_style": "Summarize the matching ticket and request human confirmation."
+    },
+    "other_or_unknown": {
+      "description": "Insufficient information or outside the current taxonomy.",
+      "required_fields": [
+        {"field": "issue_description", "label": "Ticket details", "prompt": "Please provide more detail about what you need or what issue you are seeing."}
+      ],
+      "routing_hint": {
+        "team": "app-support-triage",
+        "reason": "Unknown tickets should start with support triage."
+      },
+      "clarification_style": "Ask a short open clarification question."
+    }
+  },
+  "application_issue_subcategories": {
+    "report_performance_issue": {
+      "description": "Unable to view or download reports, slow reports, report timeouts, or broken report links.",
+      "required_fields": [
+        {"field": "affected_link", "label": "Affected link", "prompt": "Please provide the link where the report issue occurs."},
+        {"field": "screenshot_provided", "label": "Screenshot", "prompt": "Please attach a screenshot of the report issue if available."}
+      ],
+      "routing_hint": {
+        "team": "reporting-platform-support",
+        "reason": "Report view/download/performance issues usually need reporting platform investigation."
+      },
+      "duplicate_keywords": ["report", "download", "view", "timeout", "performance", "slow"]
+    },
+    "budget_variance_issue": {
+      "description": "Variance analysis, forecast, fiscal period, or currency values appear incorrect.",
+      "required_fields": [
+        {"field": "project_currency", "label": "Project currency", "prompt": "Please provide the project currency."}
+      ],
+      "routing_hint": {
+        "team": "budget-planning-support",
+        "reason": "Budget variance issues need application and finance-data review."
+      },
+      "duplicate_keywords": ["variance", "forecast", "q1", "q2", "q3", "q4", "currency"]
+    },
+    "data_quality_issue": {
+      "description": "Missing, stale, or inconsistent data in the app.",
+      "required_fields": [],
+      "routing_hint": {
+        "team": "data-quality-support",
+        "reason": "Data quality issues need source-data validation."
+      },
+      "duplicate_keywords": ["missing", "stale", "inconsistent", "incorrect data"]
+    },
+    "ui_workflow_issue": {
+      "description": "A page, button, filter, or workflow does not behave as expected.",
+      "required_fields": [],
+      "routing_hint": {
+        "team": "app-support-triage",
+        "reason": "UI workflow issues begin with support reproduction."
+      },
+      "duplicate_keywords": ["button", "filter", "page", "workflow", "screen"]
+    },
+    "integration_issue": {
+      "description": "Upstream or downstream sync, import, export, or API issue.",
+      "required_fields": [],
+      "routing_hint": {
+        "team": "integration-support",
+        "reason": "Integration issues require sync or API investigation."
+      },
+      "duplicate_keywords": ["sync", "import", "export", "api", "integration"]
+    }
+  }
+}
