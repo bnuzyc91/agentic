@@ -99,3 +99,25 @@ Interviewer asks naturally:
 - Audit rules and criteria are for audit quality control only.
 - Audit feedback is inspectable on request, not shown after every turn.
 - V1 keeps the existing process-change template schema unchanged.
+
+
+
+1. User answers a question
+   ↓
+2. Interviewer extracts information into template fields
+   ↓
+3. Audit engine checks those fields against audit_rules_v1.json
+   ↓
+4. Audit engine uses criteria markdown to explain quality gaps
+   ↓
+5. Audit returns structured feedback:
+      - target section
+      - target field
+      - failed rule
+      - evidence gap
+      - recommended question intent
+   ↓
+6. Interviewer looks in question bank for the best matching question
+   ↓
+7. Interviewer asks the next friendly question
+
