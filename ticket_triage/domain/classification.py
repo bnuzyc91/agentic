@@ -22,7 +22,25 @@ def _classify_application_subcategory(text: str) -> tuple[ApplicationIssueSubcat
         return ApplicationIssueSubcategory.BUDGET_VARIANCE_ISSUE, ["Budget variance or forecast terms found."]
     if _contains_any(text, ["report", "download", "view", "timeout", "slow", "performance"]):
         return ApplicationIssueSubcategory.REPORT_PERFORMANCE_ISSUE, ["Report view/download/performance terms found."]
-    if _contains_any(text, ["missing data", "stale", "inconsistent", "wrong data", "incorrect data"]):
+    if _contains_any(
+        text,
+        [
+            "missing data",
+            "missing record",
+            "missing po",
+            "stale",
+            "inconsistent",
+            "wrong data",
+            "incorrect data",
+            "data discrepancy",
+            "quickbase",
+            "cashflow",
+            "sap",
+            "buyinghub",
+            "ebuilder",
+            "e-builder",
+        ],
+    ):
         return ApplicationIssueSubcategory.DATA_QUALITY_ISSUE, ["Data quality terms found."]
     if _contains_any(text, ["button", "filter", "page", "screen", "workflow", "disabled"]):
         return ApplicationIssueSubcategory.UI_WORKFLOW_ISSUE, ["UI workflow terms found."]
@@ -97,6 +115,11 @@ def classify_ticket(
         "wrong",
         "slow",
         "missing",
+        "mismatch",
+        "discrepancy",
+        "quickbase",
+        "sap",
+        "cashflow",
         "disabled",
         "variance",
         "report",

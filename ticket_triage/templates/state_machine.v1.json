@@ -3,38 +3,213 @@
   "name": "annual_budget_planning_triage",
   "description": "State and action template for annual budget planning application ticket triage.",
   "final_state": "human_review",
+  "phases": [
+    "intake",
+    "context_validation",
+    "deflection",
+    "routing",
+    "resolution",
+    "closure",
+    "exception"
+  ],
+  "events": [
+    "ticket_created",
+    "context_extraction_started",
+    "required_fields_extracted",
+    "missing_required_fields_detected",
+    "duplicate_candidate_found",
+    "issue_summary_missing",
+    "source_system_missing",
+    "diagnostic_evidence_missing",
+    "minimum_context_satisfied",
+    "external_sync_lag_detected",
+    "app_view_filter_mismatch_detected",
+    "historical_data_logic_detected",
+    "known_behavior_not_matched",
+    "finance_policy_issue_detected",
+    "integration_issue_detected",
+    "data_stewardship_issue_detected",
+    "routing_unclear",
+    "fix_applied",
+    "reporter_confirmed_resolved",
+    "reporter_reports_not_resolved",
+    "inactivity_timeout_reached",
+    "ticket_closed",
+    "ticket_reopened",
+    "human_override"
+  ],
+  "action_types": [
+    "ask_for_info",
+    "route_to_team",
+    "suggest_duplicate_review",
+    "explain_intended_behavior",
+    "product_review",
+    "human_review",
+    "extract_context",
+    "request_issue_summary",
+    "request_source_system",
+    "request_diagnostic_evidence",
+    "request_missing_context",
+    "deflect_sync_lag",
+    "deflect_view_filters",
+    "deflect_historical_data_logic",
+    "route_finance",
+    "route_crc_l3",
+    "route_data_quality",
+    "ask_routing_clarification",
+    "wait_for_fix",
+    "ask_reporter_to_confirm",
+    "close_as_resolved",
+    "escalate_human_review"
+  ],
   "states": {
-    "intake": {
+    "new": {
+      "phase": "intake",
+      "description": "Ticket has arrived but has not been analyzed.",
+      "actions": ["extract_context"],
+      "next_states": ["extracting_context"]
+    },
+    "extracting_context": {
+      "phase": "intake",
       "description": "Normalize the ticket and collect title, description, comments, links, and attachments.",
       "actions": ["extract_ticket_entities"],
-      "next_states": ["classification"]
+      "next_states": ["missing_info", "context_validated", "duplicate_review"]
     },
-    "classification": {
-      "description": "Assign a broad primary category and an optional application issue subcategory.",
-      "actions": ["classify_ticket"],
-      "next_states": ["duplicate_check", "required_info_review"]
+    "missing_info": {
+      "phase": "context_validation",
+      "description": "The ticket is blocked because required rulebook context is missing.",
+      "actions": ["request_missing_context"],
+      "next_states": ["context_validated", "human_review"]
     },
-    "duplicate_check": {
-      "description": "Compare the ticket with local historical tickets and identify likely duplicates.",
-      "actions": ["find_similar_tickets"],
-      "next_states": ["required_info_review", "human_review"]
+    "context_validated": {
+      "phase": "context_validation",
+      "description": "Minimum viable context is present.",
+      "actions": ["known_behavior_check_started"],
+      "next_states": ["checking_known_behavior", "routing_review"]
     },
-    "required_info_review": {
-      "description": "Check required fields for the selected category and subcategory.",
-      "actions": ["evaluate_required_fields"],
-      "next_states": ["action_recommendation"]
+    "checking_known_behavior": {
+      "phase": "deflection",
+      "description": "Check whether the ticket matches documented intended behavior.",
+      "actions": ["deflect_sync_lag", "deflect_view_filters", "deflect_historical_data_logic"],
+      "next_states": ["intended_behavior", "routing_review"]
     },
-    "action_recommendation": {
-      "description": "Draft the next human-reviewable action.",
-      "actions": ["recommend_next_action"],
-      "next_states": ["human_review"]
+    "intended_behavior": {
+      "phase": "deflection",
+      "description": "Issue matches documented expected behavior.",
+      "actions": ["explain_intended_behavior"],
+      "next_states": ["waiting_reporter_confirmation", "complete"]
+    },
+    "routing_review": {
+      "phase": "routing",
+      "description": "Context is valid and the ticket needs an owner route.",
+      "actions": ["route_finance", "route_crc_l3", "route_data_quality", "escalate_human_review"],
+      "next_states": ["routed_finance", "routed_crc_l3", "routed_data_quality", "human_review"]
+    },
+    "duplicate_review": {
+      "phase": "routing",
+      "description": "Likely duplicate requires human confirmation.",
+      "actions": ["suggest_duplicate_review"],
+      "next_states": ["closed", "routing_review"]
+    },
+    "ready_for_access_review": {
+      "phase": "routing",
+      "description": "Access request has enough fields to begin access review.",
+      "actions": ["request_approval", "route_to_team"],
+      "next_states": ["approver_review", "access_provisioning", "human_review"]
+    },
+    "routed_finance": {
+      "phase": "routing",
+      "description": "Ticket is routed to finance for policy, accrual, currency, FX, or SAP financial-record review.",
+      "actions": ["route_finance"],
+      "next_states": ["waiting_fix", "waiting_reporter_confirmation"]
+    },
+    "routed_crc_l3": {
+      "phase": "routing",
+      "description": "Ticket is routed to CRC/L3 for integration, pipeline, sync, or complex application logic.",
+      "actions": ["route_crc_l3"],
+      "next_states": ["waiting_fix", "waiting_reporter_confirmation"]
+    },
+    "routed_data_quality": {
+      "phase": "routing",
+      "description": "Ticket is routed to data quality stewardship for direct remediation or configuration cleanup.",
+      "actions": ["route_data_quality"],
+      "next_states": ["waiting_fix", "waiting_reporter_confirmation"]
+    },
+    "waiting_reporter_confirmation": {
+      "phase": "resolution",
+      "description": "A fix or explanation was sent and the system is waiting for reporter confirmation.",
+      "actions": ["ask_reporter_to_confirm"],
+      "next_states": ["complete", "human_review"]
+    },
+    "complete": {
+      "phase": "closure",
+      "description": "Work is functionally complete and can be closed.",
+      "actions": ["close_as_resolved"],
+      "next_states": ["closed"]
+    },
+    "closed": {
+      "phase": "closure",
+      "description": "Ticket is formally closed.",
+      "actions": [],
+      "next_states": ["extracting_context"]
     },
     "human_review": {
+      "phase": "exception",
       "description": "A human agent reviews and decides whether to apply the recommendation.",
       "actions": [],
       "next_states": []
     }
   },
+  "transitions": [
+    {
+      "from_state": "new",
+      "event": "context_extraction_started",
+      "to_state": "extracting_context",
+      "action_type": "extract_context",
+      "rule_id": "intake.start",
+      "description": "Begin extracting rulebook fields from the ticket."
+    },
+    {
+      "from_state": "extracting_context",
+      "event": "diagnostic_evidence_missing",
+      "to_state": "missing_info",
+      "action_type": "request_diagnostic_evidence",
+      "rule_id": "data_quality.minimum_viable_context",
+      "description": "Data quality tickets require at least one PO number, project/S-code, document link, or screenshot."
+    },
+    {
+      "from_state": "checking_known_behavior",
+      "event": "external_sync_lag_detected",
+      "to_state": "intended_behavior",
+      "action_type": "deflect_sync_lag",
+      "rule_id": "data_quality.deflection.sync_lag",
+      "description": "Known batch sync lag should be explained rather than routed."
+    },
+    {
+      "from_state": "routing_review",
+      "event": "finance_policy_issue_detected",
+      "to_state": "routed_finance",
+      "action_type": "route_finance",
+      "rule_id": "data_quality.routing.finance",
+      "description": "Finance policy, accrual, currency, FX, or SAP financial-record issues route to finance."
+    },
+    {
+      "from_state": "routing_review",
+      "event": "integration_issue_detected",
+      "to_state": "routed_crc_l3",
+      "action_type": "route_crc_l3",
+      "rule_id": "data_quality.routing.crc_l3",
+      "description": "Sync, pipeline, integration, crash, or complex logic issues route to CRC/L3."
+    },
+    {
+      "from_state": "routing_review",
+      "event": "data_stewardship_issue_detected",
+      "to_state": "routed_data_quality",
+      "action_type": "route_data_quality",
+      "rule_id": "data_quality.routing.data_quality",
+      "description": "Direct data remediation, merge, void, or configuration issues route to data quality."
+    }
+  ],
   "primary_categories": {
     "access_request": {
       "description": "User asks for app access, role changes, or permission changes.",

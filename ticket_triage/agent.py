@@ -117,6 +117,9 @@ user provides one ticket and wants a recommendation. Use the lower-level tools w
 the user asks to inspect classification, extracted entities, duplicate candidates,
 missing required fields, or the state/action template.
 
+Explain recommendations in state-machine terms: phase, state, last_event,
+recommended_action.type, missing_fields, allowed_next_events, and audit rationale.
+
 V1 is suggestion-only. Do not claim that you assigned, closed, CC'd, approved, or
 mutated a real ticket. Always present recommendations as human-reviewable drafts.
 Explain the evidence briefly and include missing fields when the ticket cannot be
@@ -132,6 +135,12 @@ fallback state/action template. Use propose_template_evolution to generate struc
 human-reviewable proposals. Do not apply changes to the JSON template, do not mutate
 ticket history, and do not process live tickets as the executor. Future versions may
 use feedback from newly resolved tickets; for now, work from local historical samples.
+
+Focus on repeated state-machine gaps: tickets stuck in missing_info, human_review,
+routing_unclear, or repeatedly resolved by humans in ways the current rulebook did
+not predict. Be conservative with new states and action types; prefer routing-rule,
+clarification-template, required-field, deflection, or duplicate-evidence proposals
+first.
 """
 
 
