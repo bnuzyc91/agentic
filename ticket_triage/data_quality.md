@@ -1,324 +1,473 @@
-# Data Quality Ticket Triage — State Machine Design
+# Data Quality Ticket Triage — Modular Route-Agent Design
 
+Data quality tickets should not need a large custom transition map. Most of the workflow can be expressed through one reusable routing pattern:
 
----
+```text
+extract context
+→ decide route outcome
+→ request information OR deflect intended behavior OR route to team OR human review
+```
 
-## 1. Minimum Viable Context Gate
+The category-specific behavior should live in the rulebook as:
 
-The first gate for any data quality issue is confirming minimum viable context.
+```text
+context_requirements
+deflection_rules
+team_route_rules
+```
 
-### Required Components
-
-| Field | Requirement |
-|-------|-------------|
-| `issue_summary` | Required |
-| `source_system` | Required |
-| `diagnostic_evidence` | At least one of the following |
-
-**Diagnostic evidence** is satisfied if at least one of these is present:
-
-- `po_number`
-- `project_code_or_s_code`
-- `document_link`
-- `screenshot`
-
-### State Transitions
-
-| Current State | Event | Condition | Next State | Action |
-|--------------|-------|-----------|------------|--------|
-| `NEW` | `ticket_received` | always | `NEW` | Extract fields |
-| `NEW` | `source_system_missing` | No source system found | `MISSING_INFO` | Ask for source system |
-| `NEW` | `diagnostic_evidence_missing` | No PO / project / link / screenshot | `MISSING_INFO` | Ask for evidence |
-| `NEW` | `issue_summary_missing` | No clear discrepancy or request | `MISSING_INFO` | Ask for issue summary |
-| `MISSING_INFO` | `reporter_provided_missing_info` | All required context now present | `CONTEXT_VALIDATED` | Continue triage |
-| `NEW` | `minimum_context_satisfied` | Summary + source + evidence present | `CONTEXT_VALIDATED` | Proceed to deflection / routing |
+This keeps the state machine small and makes the process easier to extend to other bug types.
 
 ---
 
-## 2. Intended Behavior Deflection
+## 1. Core Route Outcomes
 
-Before routing to engineering, check whether the reported issue matches a known, expected behavior pattern.
+For data quality, the Route Agent should return one of four outcomes:
 
-**Known deflection categories:**
+| Route Outcome | Meaning | Resulting State | Recommended Action |
+|---|---|---|---|
+| `request_information` | Required context is missing | `missing_info` | `request_information` |
+| `deflect_intended_behavior` | Issue matches known expected behavior | `intended_behavior` | `deflect_intended_behavior` |
+| `route_to_team` | Enough context exists and a team route matches | `routed_to_team` | `route_to_team` |
+| `escalate_human_review` | Rulebook cannot confidently decide | `human_review` | `escalate_human_review` |
 
-- `external_sync_lag`
-- `app_view_filter_mismatch`
-- `historical_data_logic`
-
-### State Transitions
-
-| Current State | Event | Condition | Next State | Action |
-|--------------|-------|-----------|------------|--------|
-| `CONTEXT_VALIDATED` | `known_sync_lag_detected` | Mismatch likely due to batch sync delay | `INTENDED_BEHAVIOR` | Explain sync delay |
-| `CONTEXT_VALIDATED` | `view_filter_mismatch_detected` | Difference due to active filters | `INTENDED_BEHAVIOR` | Explain filter behavior |
-| `CONTEXT_VALIDATED` | `historical_logic_detected` | TLY / prior year archival behavior | `INTENDED_BEHAVIOR` | Explain historical data logic |
-| `INTENDED_BEHAVIOR` | `explanation_sent` | Response drafted / sent | `COMPLETE` or `WAITING_REPORTER_CONFIRMATION` | Wait for confirmation or close |
+These are reusable across many ticket types, not just data quality.
 
 ---
 
-## 3. Routing Logic After Validation
+## 2. Generic State Model
 
-Once context is validated and the issue is not deflected, route based on issue type.
+Keep states generic. Do not create a new state for every destination team.
 
-### Routing Paths
+### Recommended Shared States
+
+| State | Meaning |
+|---|---|
+| `new` | Ticket has arrived but has not been processed |
+| `extracting_context` | Agent is extracting entities and evidence |
+| `route_decision` | Route Agent is evaluating gates and route rules |
+| `missing_info` | Ticket is blocked until reporter provides required context |
+| `intended_behavior` | Ticket matches documented expected behavior |
+| `routed_to_team` | Ticket has enough context and should be routed to a team |
+| `waiting_reporter_confirmation` | Fix or explanation was sent; waiting for reporter confirmation |
+| `complete` | Work is functionally complete |
+| `closed` | Ticket is formally closed |
+| `human_review` | Rulebook cannot confidently decide |
+
+### Important Design Choice
+
+Prefer this:
 
 ```json
 {
-  "finance": [
-    "accruals",
-    "currency codes",
-    "FX rates",
-    "financial policies",
-    "SAP financial records"
-  ],
-  "crc_l3": [
-    "sync failure",
-    "pipeline error",
-    "SAP-to-Quickbase integration drops",
-    "software crash",
-    "complex logic"
-  ],
-  "data_quality": [
-    "data entry error",
-    "merge project",
-    "void project",
-    "minor configuration adjustment"
+  "state": "routed_to_team",
+  "route_target": "finance_queue",
+  "route_rule_id": "finance_policy_route"
+}
+```
+
+Do not model every team as a separate state unless that team has a genuinely different workflow:
+
+```json
+{
+  "state": "routed_finance"
+}
+```
+
+`finance_queue`, `crc_l3_support`, and `data_quality_team` are route targets, not core workflow states.
+
+---
+
+## 3. Generic Action Types
+
+Use a small reusable action enum:
+
+```text
+extract_context
+request_information
+deflect_intended_behavior
+route_to_team
+ask_reporter_to_confirm
+close_as_resolved
+escalate_human_review
+```
+
+Specificity belongs in metadata:
+
+```json
+{
+  "type": "request_information",
+  "comment_template": "ask_for_diagnostic_evidence",
+  "missing_fields": ["diagnostic_evidence"]
+}
+```
+
+or:
+
+```json
+{
+  "type": "route_to_team",
+  "route_target": "finance_queue",
+  "route_rule_id": "finance_policy_route"
+}
+```
+
+This avoids action-type explosion such as:
+
+```text
+request_source_system
+request_diagnostic_evidence
+route_finance
+route_crc_l3
+deflect_sync_lag
+```
+
+Those can be represented as templates, route rules, or deflection rule IDs.
+
+---
+
+## 4. Route Agent Algorithm
+
+The Route Agent runs the same gate sequence for every ticket type:
+
+```text
+1. Context Gate
+   If required context is missing:
+   → state = missing_info
+   → action = request_information
+
+2. Deflection Gate
+   If known intended behavior matches:
+   → state = intended_behavior
+   → action = deflect_intended_behavior
+
+3. Team Routing Gate
+   If a route rule matches:
+   → state = routed_to_team
+   → action = route_to_team
+
+4. Fallback
+   If no route is confident:
+   → state = human_review
+   → action = escalate_human_review
+```
+
+Diagram:
+
+```mermaid
+flowchart TD
+  A["Extracted Ticket"] --> B["Context Gate"]
+  B -->|Missing Context| C["missing_info / request_information"]
+  B -->|Context Satisfied| D["Deflection Gate"]
+  D -->|Known Intended Behavior| E["intended_behavior / deflect_intended_behavior"]
+  D -->|Not Deflected| F["Team Routing Gate"]
+  F -->|Route Match| G["routed_to_team / route_to_team"]
+  F -->|No Confident Route| H["human_review / escalate_human_review"]
+```
+
+---
+
+## 5. Data Quality Rulebook Module
+
+Data quality-specific logic should be declared as rulebook configuration.
+
+### Context Requirements
+
+```json
+{
+  "context_requirements": {
+    "required_all": [
+      "issue_summary",
+      "source_system"
+    ],
+    "required_any": [
+      {
+        "group": "diagnostic_evidence",
+        "fields": [
+          "po_numbers",
+          "project_codes",
+          "document_links",
+          "has_screenshot"
+        ]
+      }
+    ]
+  }
+}
+```
+
+Interpretation:
+
+```text
+issue_summary is required
+source_system is required
+at least one diagnostic evidence field is required
+```
+
+Diagnostic evidence is satisfied if the ticket has at least one of:
+
+```text
+PO number
+project ID / S-code
+linked report / document
+screenshot
+```
+
+If a link or screenshot exists, diagnostic evidence is satisfied.
+
+---
+
+## 6. Deflection Rules
+
+Deflection rules explain known intended behavior before routing to a human team.
+
+```json
+{
+  "deflection_rules": [
+    {
+      "id": "external_sync_lag",
+      "criteria": {
+        "keywords": ["sync lag", "batch sync", "sync delay"]
+      },
+      "result": {
+        "state": "intended_behavior",
+        "action_type": "deflect_intended_behavior",
+        "comment_template": "deflect_sync_lag"
+      }
+    },
+    {
+      "id": "view_filter_mismatch",
+      "criteria": {
+        "keywords": ["filter", "dashboard view", "applied filters"]
+      },
+      "result": {
+        "state": "intended_behavior",
+        "action_type": "deflect_intended_behavior",
+        "comment_template": "deflect_view_filters"
+      }
+    },
+    {
+      "id": "historical_data_logic",
+      "criteria": {
+        "keywords": ["TLY", "prior year", "historical", "archival"]
+      },
+      "result": {
+        "state": "intended_behavior",
+        "action_type": "deflect_intended_behavior",
+        "comment_template": "deflect_historical_data_logic"
+      }
+    }
   ]
 }
 ```
 
-### State Transitions
+The important abstraction:
 
-| Current State | Event | Condition | Next State | Action |
-|--------------|-------|-----------|------------|--------|
-| `CONTEXT_VALIDATED` | `finance_policy_issue_detected` | Accrual / currency / FX / SAP finance terms | `ROUTED_FINANCE` | Route to finance queue |
-| `CONTEXT_VALIDATED` | `integration_issue_detected` | Sync / pipeline / complex integration terms | `ROUTED_CRC_L3` | Route to CRC / L3 |
-| `CONTEXT_VALIDATED` | `data_stewardship_issue_detected` | Data entry / merge / void / config issue | `ROUTED_DATA_QUALITY` | Route to data quality team |
-| `CONTEXT_VALIDATED` | `routing_unclear` | No confident route | `MISSING_INFO` or `HUMAN_REVIEW` | Ask for clarification or escalate |
+```text
+state = intended_behavior
+action_type = deflect_intended_behavior
+deflection_rule_id = external_sync_lag
+comment_template = deflect_sync_lag
+```
+
+The specific deflection type is metadata, not a separate state or action type.
 
 ---
 
-## 4. Recommended Action Types
+## 7. Team Route Rules
 
-Actions must come from the predefined enum below — the agent cannot invent new action types.
-
-```
-EXTRACT_CONTEXT
-REQUEST_INFO
-DEFLECT_INTENDED_BEHAVIOR
-ROUTE_FINANCE
-ROUTE_CRC_L3
-ROUTE_DATA_QUALITY
-WAIT_CONFIRMATION
-CLOSE_TICKET
-ESCALATE_HUMAN_REVIEW
-```
-
-### Example Action Object
+Team routing rules should be independent objects. Each rule has prerequisites, criteria, and a route target.
 
 ```json
 {
-  "type": "REQUEST_INFO",
-  "comment_template": "ask_for_evidence",
-  "next_assignee": "reporter",
-  "message": "Please provide a PO number, project ID/S-code, linked report, or screenshot so the team can locate the discrepancy."
+  "route_rules": [
+    {
+      "id": "finance_policy_route",
+      "target": "finance_queue",
+      "prerequisites": {
+        "context_satisfied": true
+      },
+      "criteria": {
+        "keywords": [
+          "accrual",
+          "currency",
+          "FX rate",
+          "financial policy",
+          "SAP financial records"
+        ]
+      },
+      "result": {
+        "state": "routed_to_team",
+        "action_type": "route_to_team",
+        "comment_template": "route_finance"
+      }
+    },
+    {
+      "id": "crc_l3_route",
+      "target": "crc_l3_support",
+      "prerequisites": {
+        "context_satisfied": true
+      },
+      "criteria": {
+        "keywords": [
+          "sync failure",
+          "pipeline error",
+          "SAP-to-Quickbase integration",
+          "software crash",
+          "complex logic"
+        ]
+      },
+      "result": {
+        "state": "routed_to_team",
+        "action_type": "route_to_team",
+        "comment_template": "route_crc_l3"
+      }
+    },
+    {
+      "id": "data_quality_stewardship_route",
+      "target": "data_quality_team",
+      "prerequisites": {
+        "context_satisfied": true
+      },
+      "criteria": {
+        "keywords": [
+          "data entry",
+          "merge project",
+          "void project",
+          "minor configuration",
+          "missing record"
+        ]
+      },
+      "result": {
+        "state": "routed_to_team",
+        "action_type": "route_to_team",
+        "comment_template": "route_data_quality"
+      }
+    }
+  ]
 }
 ```
----
 
-# Alternative Approach — One Unified Transition Map Across Phases
-
-Rather than separate tables per phase, a single transition map covers the full workflow. Each row carries its phase as a column so the map remains one source of truth.
-
-**Concept definitions:**
-
-| Term | Meaning |
-|------|---------|
-| `phase` | Broad section of the workflow |
-| `state` | Exact machine state (predefined enum) |
-| `event` | What just happened / which rule fired |
-| `recommended_action.type` | What the agent should suggest next |
+The route target can vary without changing the state machine.
 
 ---
 
-## 1. State Map by Phase
+## 8. Abstract State Object
 
-| Phase | State | Meaning |
-|-------|-------|---------|
-| `INTAKE` | `NEW` | Ticket has arrived but has not been analyzed |
-| `INTAKE` | `EXTRACTING_CONTEXT` | Agent extracts summary, systems, IDs, links, screenshot flags |
-| `CONTEXT_VALIDATION` | `MISSING_INFO` | Minimum viable context is not satisfied |
-| `CONTEXT_VALIDATION` | `CONTEXT_VALIDATED` | Required context is present |
-| `DEFLECTION` | `CHECKING_KNOWN_BEHAVIOR` | Agent checks whether this is expected behavior |
-| `DEFLECTION` | `INTENDED_BEHAVIOR` | Issue matches documented expected behavior |
-| `ROUTING` | `ROUTING_REVIEW` | Context is valid and issue needs a team route |
-| `ROUTING` | `ROUTED_FINANCE` | Routed to finance / policy team |
-| `ROUTING` | `ROUTED_CRC_L3` | Routed to CRC / L3 engineering / support |
-| `ROUTING` | `ROUTED_DATA_QUALITY` | Routed to data quality / stewardship team |
-| `RESOLUTION` | `WAITING_FIX` | Ticket is assigned and waiting for fix / remediation |
-| `RESOLUTION` | `WAITING_REPORTER_CONFIRMATION` | Fix / explanation sent; waiting for reporter confirmation |
-| `CLOSURE` | `COMPLETE` | Work is functionally complete |
-| `CLOSURE` | `CLOSED` | Ticket is formally closed |
-| `EXCEPTION` | `HUMAN_REVIEW` | Rulebook cannot confidently decide |
-
----
-
-## 2. Events by Group
-
-**Intake / Context Events**
-- `ticket_created`
-- `context_extraction_started`
-- `issue_summary_extracted`
-- `source_system_extracted`
-- `diagnostic_evidence_extracted`
-- `minimum_context_satisfied`
-- `issue_summary_missing`
-- `source_system_missing`
-- `diagnostic_evidence_missing`
-- `reporter_provided_missing_info`
-- `reporter_response_insufficient`
-- `no_reporter_response`
-
-**Diagnostic Evidence Events**
-- `po_number_found`
-- `project_code_found`
-- `document_link_found`
-- `screenshot_found`
-- `diagnostic_evidence_satisfied`
-- `diagnostic_evidence_not_found`
-
-**Deflection Events**
-- `known_behavior_check_started`
-- `external_sync_lag_detected`
-- `app_view_filter_mismatch_detected`
-- `historical_data_logic_detected`
-- `known_behavior_not_matched`
-- `intended_behavior_explanation_sent`
-
-**Routing Events**
-- `routing_review_started`
-- `finance_policy_issue_detected`
-- `integration_issue_detected`
-- `data_stewardship_issue_detected`
-- `routing_unclear`
-- `route_confirmed`
-
-**Resolution / Closure Events**
-- `fix_applied`
-- `explanation_sent`
-- `reporter_confirmed_resolved`
-- `reporter_reports_not_resolved`
-- `inactivity_timeout_reached`
-- `ticket_closed`
-- `ticket_reopened`
-- `human_override`
-
----
-
-## 3. Recommended Action Types
-
-- `EXTRACT_CONTEXT`
-- `REQUEST_ISSUE_SUMMARY`
-- `REQUEST_SOURCE_SYSTEM`
-- `REQUEST_DIAGNOSTIC_EVIDENCE`
-- `REQUEST_MISSING_CONTEXT`
-- `DEFLECT_SYNC_LAG`
-- `DEFLECT_VIEW_FILTERS`
-- `DEFLECT_HISTORICAL_DATA_LOGIC`
-- `ROUTE_FINANCE`
-- `ROUTE_CRC_L3`
-- `ROUTE_DATA_QUALITY`
-- `ASK_ROUTING_CLARIFICATION`
-- `WAIT_FOR_FIX`
-- `ASK_REPORTER_TO_CONFIRM`
-- `CLOSE_AS_RESOLVED`
-- `ESCALATE_HUMAN_REVIEW`
-
----
-
-## 4. Full Transition Map
-
-| Phase | From State | Event | Condition | To State | Recommended Action |
-|-------|-----------|-------|-----------|----------|--------------------|
-| INTAKE | `NEW` | `ticket_created` | always | `EXTRACTING_CONTEXT` | `EXTRACT_CONTEXT` |
-| INTAKE | `EXTRACTING_CONTEXT` | `issue_summary_missing` | No clear discrepancy / request | `MISSING_INFO` | `REQUEST_ISSUE_SUMMARY` |
-| INTAKE | `EXTRACTING_CONTEXT` | `source_system_missing` | No source / comparison system | `MISSING_INFO` | `REQUEST_SOURCE_SYSTEM` |
-| INTAKE | `EXTRACTING_CONTEXT` | `diagnostic_evidence_missing` | No PO / project / link / screenshot | `MISSING_INFO` | `REQUEST_DIAGNOSTIC_EVIDENCE` |
-| INTAKE | `EXTRACTING_CONTEXT` | `minimum_context_satisfied` | Summary + source + evidence present | `CONTEXT_VALIDATED` | `EXTRACT_CONTEXT` |
-| CONTEXT_VALIDATION | `MISSING_INFO` | `reporter_provided_missing_info` | All required context now satisfied | `CONTEXT_VALIDATED` | `EXTRACT_CONTEXT` |
-| CONTEXT_VALIDATION | `MISSING_INFO` | `reporter_response_insufficient` | Still missing required context | `MISSING_INFO` | `REQUEST_MISSING_CONTEXT` |
-| CONTEXT_VALIDATION | `MISSING_INFO` | `no_reporter_response` | Timeout | `HUMAN_REVIEW` or `CLOSED` | `ESCALATE_HUMAN_REVIEW` |
-| DEFLECTION | `CONTEXT_VALIDATED` | `known_behavior_check_started` | Always before routing | `CHECKING_KNOWN_BEHAVIOR` | `EXTRACT_CONTEXT` |
-| DEFLECTION | `CHECKING_KNOWN_BEHAVIOR` | `external_sync_lag_detected` | Batch sync lag likely | `INTENDED_BEHAVIOR` | `DEFLECT_SYNC_LAG` |
-| DEFLECTION | `CHECKING_KNOWN_BEHAVIOR` | `app_view_filter_mismatch_detected` | Dashboard / filter mismatch likely | `INTENDED_BEHAVIOR` | `DEFLECT_VIEW_FILTERS` |
-| DEFLECTION | `CHECKING_KNOWN_BEHAVIOR` | `historical_data_logic_detected` | TLY / prior-year archival logic | `INTENDED_BEHAVIOR` | `DEFLECT_HISTORICAL_DATA_LOGIC` |
-| DEFLECTION | `CHECKING_KNOWN_BEHAVIOR` | `known_behavior_not_matched` | Not deflectable | `ROUTING_REVIEW` | `EXTRACT_CONTEXT` |
-| ROUTING | `ROUTING_REVIEW` | `finance_policy_issue_detected` | Accruals / currency / FX / SAP finance records | `ROUTED_FINANCE` | `ROUTE_FINANCE` |
-| ROUTING | `ROUTING_REVIEW` | `integration_issue_detected` | Sync failure / pipeline / integration / crash | `ROUTED_CRC_L3` | `ROUTE_CRC_L3` |
-| ROUTING | `ROUTING_REVIEW` | `data_stewardship_issue_detected` | Merge / void / data entry / config | `ROUTED_DATA_QUALITY` | `ROUTE_DATA_QUALITY` |
-| ROUTING | `ROUTING_REVIEW` | `routing_unclear` | No confident route | `HUMAN_REVIEW` | `ESCALATE_HUMAN_REVIEW` |
-| RESOLUTION | `ROUTED_*` | `fix_applied` | Fix / remediation completed | `WAITING_REPORTER_CONFIRMATION` | `ASK_REPORTER_TO_CONFIRM` |
-| RESOLUTION | `INTENDED_BEHAVIOR` | `intended_behavior_explanation_sent` | Explanation sent | `WAITING_REPORTER_CONFIRMATION` | `ASK_REPORTER_TO_CONFIRM` |
-| RESOLUTION | `WAITING_REPORTER_CONFIRMATION` | `reporter_confirmed_resolved` | Reporter confirms | `COMPLETE` | `CLOSE_AS_RESOLVED` |
-| RESOLUTION | `WAITING_REPORTER_CONFIRMATION` | `reporter_reports_not_resolved` | Reporter still sees issue | `HUMAN_REVIEW` | `ESCALATE_HUMAN_REVIEW` |
-| RESOLUTION | `WAITING_REPORTER_CONFIRMATION` | `inactivity_timeout_reached` | No response after policy window | `COMPLETE` | `CLOSE_AS_RESOLVED` |
-| CLOSURE | `COMPLETE` | `ticket_closed` | Ticket formally closed | `CLOSED` | `CLOSE_AS_RESOLVED` |
-| CLOSURE | `CLOSED` | `ticket_reopened` | Reporter reopens | `EXTRACTING_CONTEXT` | `EXTRACT_CONTEXT` |
-
----
-
-## 5. Abstract State Object
+The Route Agent should return a compact state object:
 
 ```json
 {
   "ticket_id": "BUG-123",
   "rulebook": "data_quality_v1",
-  "category": "DATA_QUALITY",
-  "phase": "CONTEXT_VALIDATION",
-  "state": "MISSING_INFO",
-  "last_event": "diagnostic_evidence_missing",
+  "category": "data_quality",
+  "phase": "routing",
+  "state": "routed_to_team",
+  "last_event": "route_matched",
 
   "entities": {
-    "issue_summary": "Quickbase cashflow is missing a PO record",
+    "issue_summary": "Quickbase cashflow is missing a SAP PO record",
     "source_system": "SAP",
     "comparison_system": "Quickbase",
-    "po_numbers": [],
+    "po_numbers": ["PO-12345"],
     "project_codes": [],
     "document_links": [],
     "has_screenshot": false
   },
 
   "validation": {
-    "minimum_context_satisfied": false,
-    "missing_fields": ["diagnostic_evidence"],
-    "diagnostic_evidence_satisfied": false
-  },
-
-  "known_behavior": {
-    "matched": false,
-    "type": null
+    "context_satisfied": true,
+    "missing_fields": [],
+    "satisfied_evidence_group": "diagnostic_evidence"
   },
 
   "routing": {
-    "route_target": null,
-    "route_reason": null
+    "route_decision": "route_to_team",
+    "route_target": "finance_queue",
+    "route_rule_id": "finance_policy_route",
+    "route_reason": "Ticket mentions SAP financial records and PO discrepancy."
+  },
+
+  "deflection": {
+    "matched": false,
+    "deflection_rule_id": null
   },
 
   "recommended_action": {
-    "type": "REQUEST_DIAGNOSTIC_EVIDENCE",
-    "comment_template": "ask_for_evidence",
-    "next_assignee": "reporter",
-    "message": "Please provide a PO number, project ID/S-code, linked report, or screenshot so the team can locate the discrepancy."
+    "type": "route_to_team",
+    "target": "finance_queue",
+    "comment_template": "route_finance",
+    "message": "Route to Finance for SAP financial-record discrepancy review."
   },
 
   "audit": [
     {
-      "from_state": "EXTRACTING_CONTEXT",
-      "event": "diagnostic_evidence_missing",
-      "to_state": "MISSING_INFO",
-      "rule_id": "minimum_context.diagnostic_evidence",
-      "reason": "No PO number, project code, document link, or screenshot was found."
+      "gate": "context_gate",
+      "result": "passed",
+      "reason": "Issue summary, source system, and PO number are present."
+    },
+    {
+      "gate": "deflection_gate",
+      "result": "not_matched",
+      "reason": "No intended-behavior rule matched."
+    },
+    {
+      "gate": "team_routing_gate",
+      "result": "matched",
+      "rule_id": "finance_policy_route",
+      "reason": "SAP financial-record criteria matched."
     }
   ]
 }
 ```
+
+---
+
+## 9. Extension Pattern
+
+To add a new bug type, do not create a new full state machine.
+
+Add a new rulebook module:
+
+```text
+rulebooks/new_bug_type.v1.json
+```
+
+with:
+
+```json
+{
+  "category": "new_bug_type",
+  "context_requirements": {},
+  "deflection_rules": [],
+  "route_rules": []
+}
+```
+
+The same Route Agent can process it.
+
+This is the reusable contract:
+
+```text
+category-specific rulebook in
+generic route decision out
+```
+
+---
+
+## 10. Design Principle
+
+Keep the state machine generic.
+
+Put category-specific detail into:
+
+```text
+required fields
+evidence groups
+deflection rule IDs
+route rule IDs
+route targets
+comment templates
+criteria keywords
+```
+
+The workflow should remain stable as new bug types are added.
