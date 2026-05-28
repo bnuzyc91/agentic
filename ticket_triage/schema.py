@@ -38,6 +38,7 @@ class TriagePhase(str, Enum):
 class TriageState(str, Enum):
     NEW = "new"
     EXTRACTING_CONTEXT = "extracting_context"
+    ROUTE_DECISION = "route_decision"
     MISSING_INFO = "missing_info"
     CONTEXT_VALIDATED = "context_validated"
     CHECKING_KNOWN_BEHAVIOR = "checking_known_behavior"
@@ -51,6 +52,7 @@ class TriageState(str, Enum):
     ROUTED_FINANCE = "routed_finance"
     ROUTED_CRC_L3 = "routed_crc_l3"
     ROUTED_DATA_QUALITY = "routed_data_quality"
+    ROUTED_TO_TEAM = "routed_to_team"
     ROUTED_APPLICATION_SUPPORT = "routed_application_support"
     ROUTED_PRODUCT_REVIEW = "routed_product_review"
     WAITING_FIX = "waiting_fix"
@@ -81,6 +83,7 @@ class TriageEvent(str, Enum):
     APP_VIEW_FILTER_MISMATCH_DETECTED = "app_view_filter_mismatch_detected"
     HISTORICAL_DATA_LOGIC_DETECTED = "historical_data_logic_detected"
     KNOWN_BEHAVIOR_NOT_MATCHED = "known_behavior_not_matched"
+    ROUTE_MATCHED = "route_matched"
     FINANCE_POLICY_ISSUE_DETECTED = "finance_policy_issue_detected"
     INTEGRATION_ISSUE_DETECTED = "integration_issue_detected"
     DATA_STEWARDSHIP_ISSUE_DETECTED = "data_stewardship_issue_detected"
@@ -113,12 +116,14 @@ class ActionType(str, Enum):
     REQUEST_SOURCE_SYSTEM = "request_source_system"
     REQUEST_DIAGNOSTIC_EVIDENCE = "request_diagnostic_evidence"
     REQUEST_MISSING_CONTEXT = "request_missing_context"
+    REQUEST_INFORMATION = "request_information"
     DEFLECT_SYNC_LAG = "deflect_sync_lag"
     DEFLECT_VIEW_FILTERS = "deflect_view_filters"
     DEFLECT_HISTORICAL_DATA_LOGIC = "deflect_historical_data_logic"
     ROUTE_FINANCE = "route_finance"
     ROUTE_CRC_L3 = "route_crc_l3"
     ROUTE_DATA_QUALITY = "route_data_quality"
+    DEFLECT_INTENDED_BEHAVIOR = "deflect_intended_behavior"
     ASK_ROUTING_CLARIFICATION = "ask_routing_clarification"
     WAIT_FOR_FIX = "wait_for_fix"
     ASK_REPORTER_TO_CONFIRM = "ask_reporter_to_confirm"
@@ -280,6 +285,8 @@ class RecommendedAction(BaseModel):
     team: str | None = None
     comment_template: str | None = None
     next_assignee: str | None = None
+    target: str | None = None
+    rule_id: str | None = None
     comment: str
     confidence: float = Field(ge=0.0, le=1.0)
     requires_human_review: bool = True
@@ -309,6 +316,11 @@ class TriageOutput(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     audit_evidence: list[str] = Field(default_factory=list)
     audit: list[AuditEntry] = Field(default_factory=list)
+    module_path: list[str] = Field(default_factory=list)
+    module_state: str | None = None
+    route_target: str | None = None
+    route_rule_id: str | None = None
+    deflection_rule_id: str | None = None
 
 
 class TemplateEvolutionProposal(BaseModel):

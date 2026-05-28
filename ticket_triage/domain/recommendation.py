@@ -7,6 +7,7 @@ from ticket_triage.domain.duplicates import find_similar_tickets
 from ticket_triage.domain.extraction import extract_entities
 from ticket_triage.domain.loading import load_state_machine
 from ticket_triage.domain.parsing import coerce_ticket
+from ticket_triage.domain.routing import RouteContext, route_ticket
 from ticket_triage.schema import (
     ActionType,
     ApplicationIssueSubcategory,
@@ -72,125 +73,6 @@ def _clarification_comment(missing_fields: list[MissingField]) -> str:
     )
 
 
-def _text(ticket: Ticket) -> str:
-    comments = " ".join(comment.body for comment in ticket.comments)
-    return f"{ticket.title} {ticket.description} {comments}".lower()
-
-
-def _missing_data_quality_context(entities: ExtractedEntities) -> list[MissingField]:
-    missing: list[MissingField] = []
-    if _is_missing(entities, "issue_description"):
-        missing.append(
-            MissingField(
-                field="issue_summary",
-                label="Issue summary",
-                prompt="Please describe the data discrepancy or requested correction.",
-            )
-        )
-    if _is_missing(entities, "source_system"):
-        missing.append(
-            MissingField(
-                field="source_system",
-                label="Source system",
-                prompt="Please provide the source system, such as SAP, Quickbase, BuyingHub, or eBuilder.",
-            )
-        )
-    evidence_satisfied = bool(
-        entities.po_numbers
-        or entities.project_codes
-        or entities.document_links
-        or entities.affected_link
-        or entities.screenshot_provided
-    )
-    if not evidence_satisfied:
-        missing.append(
-            MissingField(
-                field="diagnostic_evidence",
-                label="Diagnostic evidence",
-                prompt=(
-                    "Please provide at least one PO number, project ID/S-code, "
-                    "linked report, or screenshot."
-                ),
-            )
-        )
-    return missing
-
-
-def _first_missing_context_event(missing_fields: list[MissingField]) -> TriageEvent:
-    fields = [field.field for field in missing_fields]
-    if "issue_summary" in fields:
-        return TriageEvent.ISSUE_SUMMARY_MISSING
-    if "source_system" in fields:
-        return TriageEvent.SOURCE_SYSTEM_MISSING
-    return TriageEvent.DIAGNOSTIC_EVIDENCE_MISSING
-
-
-def _request_context_action_type(event: TriageEvent) -> ActionType:
-    if event == TriageEvent.ISSUE_SUMMARY_MISSING:
-        return ActionType.REQUEST_ISSUE_SUMMARY
-    if event == TriageEvent.SOURCE_SYSTEM_MISSING:
-        return ActionType.REQUEST_SOURCE_SYSTEM
-    if event == TriageEvent.DIAGNOSTIC_EVIDENCE_MISSING:
-        return ActionType.REQUEST_DIAGNOSTIC_EVIDENCE
-    return ActionType.REQUEST_MISSING_CONTEXT
-
-
-def _data_quality_deflection(text: str) -> tuple[TriageEvent, ActionType, str] | None:
-    if any(term in text for term in ["sync lag", "batch sync", "sync delay"]):
-        return (
-            TriageEvent.EXTERNAL_SYNC_LAG_DETECTED,
-            ActionType.DEFLECT_SYNC_LAG,
-            "The discrepancy appears consistent with documented external batch sync delay behavior.",
-        )
-    if any(term in text for term in ["filter", "dashboard view", "view mismatch", "applied filters"]):
-        return (
-            TriageEvent.APP_VIEW_FILTER_MISMATCH_DETECTED,
-            ActionType.DEFLECT_VIEW_FILTERS,
-            "The discrepancy appears consistent with dashboard or view filter differences.",
-        )
-    if any(term in text for term in ["tly", "prior year", "historical", "archival"]):
-        return (
-            TriageEvent.HISTORICAL_DATA_LOGIC_DETECTED,
-            ActionType.DEFLECT_HISTORICAL_DATA_LOGIC,
-            "The discrepancy appears consistent with documented historical data logic.",
-        )
-    return None
-
-
-def _data_quality_route(text: str) -> tuple[TriageState, TriageEvent, ActionType, str, str]:
-    if any(term in text for term in ["accrual", "currency", "fx rate", "financial policy", "sap financial"]):
-        return (
-            TriageState.ROUTED_FINANCE,
-            TriageEvent.FINANCE_POLICY_ISSUE_DETECTED,
-            ActionType.ROUTE_FINANCE,
-            "finance_queue",
-            "Validated data quality issue involves finance policy, currency, FX, accrual, or SAP financial record alignment.",
-        )
-    if any(term in text for term in ["sync failure", "pipeline", "integration", "sap-to-quickbase", "crash"]):
-        return (
-            TriageState.ROUTED_CRC_L3,
-            TriageEvent.INTEGRATION_ISSUE_DETECTED,
-            ActionType.ROUTE_CRC_L3,
-            "crc_l3_support",
-            "Validated data quality issue involves sync, pipeline, integration, or complex application logic.",
-        )
-    if any(term in text for term in ["data entry", "merge", "void", "configuration", "missing record", "missing po"]):
-        return (
-            TriageState.ROUTED_DATA_QUALITY,
-            TriageEvent.DATA_STEWARDSHIP_ISSUE_DETECTED,
-            ActionType.ROUTE_DATA_QUALITY,
-            "data_quality_team",
-            "Validated data quality issue involves direct remediation or data stewardship.",
-        )
-    return (
-        TriageState.HUMAN_REVIEW,
-        TriageEvent.ROUTING_UNCLEAR,
-        ActionType.ESCALATE_HUMAN_REVIEW,
-        "app-support-triage",
-        "Context is valid, but the rulebook does not identify a confident route.",
-    )
-
-
 def _allowed_next_events(state: TriageState) -> list[TriageEvent]:
     mapping: dict[TriageState, list[TriageEvent]] = {
         TriageState.NEW: [TriageEvent.CONTEXT_EXTRACTION_STARTED],
@@ -199,6 +81,16 @@ def _allowed_next_events(state: TriageState) -> list[TriageEvent]:
             TriageEvent.SOURCE_SYSTEM_MISSING,
             TriageEvent.DIAGNOSTIC_EVIDENCE_MISSING,
             TriageEvent.MINIMUM_CONTEXT_SATISFIED,
+        ],
+        TriageState.ROUTE_DECISION: [
+            TriageEvent.ISSUE_SUMMARY_MISSING,
+            TriageEvent.SOURCE_SYSTEM_MISSING,
+            TriageEvent.DIAGNOSTIC_EVIDENCE_MISSING,
+            TriageEvent.EXTERNAL_SYNC_LAG_DETECTED,
+            TriageEvent.APP_VIEW_FILTER_MISMATCH_DETECTED,
+            TriageEvent.HISTORICAL_DATA_LOGIC_DETECTED,
+            TriageEvent.ROUTE_MATCHED,
+            TriageEvent.ROUTING_UNCLEAR,
         ],
         TriageState.MISSING_INFO: [
             TriageEvent.REPORTER_PROVIDED_MISSING_INFO,
@@ -217,6 +109,11 @@ def _allowed_next_events(state: TriageState) -> list[TriageEvent]:
             TriageEvent.INTEGRATION_ISSUE_DETECTED,
             TriageEvent.DATA_STEWARDSHIP_ISSUE_DETECTED,
             TriageEvent.ROUTING_UNCLEAR,
+        ],
+        TriageState.ROUTED_TO_TEAM: [
+            TriageEvent.FIX_APPLIED,
+            TriageEvent.REPORTER_REPORTS_NOT_RESOLVED,
+            TriageEvent.HUMAN_OVERRIDE,
         ],
         TriageState.WAITING_REPORTER_CONFIRMATION: [
             TriageEvent.REPORTER_CONFIRMED_RESOLVED,
@@ -350,118 +247,38 @@ def _triage_data_quality_ticket(
     entities: ExtractedEntities,
     classification_confidence: float,
 ) -> TriageOutput:
-    text = _text(ticket)
-    context_missing = _missing_data_quality_context(entities)
-
-    if context_missing:
-        event = _first_missing_context_event(context_missing)
-        action_type = _request_context_action_type(event)
-        action = RecommendedAction(
-            action_type=action_type,
-            state=TriageState.MISSING_INFO.value,
-            next_assignee="reporter",
-            comment_template={
-                TriageEvent.ISSUE_SUMMARY_MISSING: "ask_for_issue_summary",
-                TriageEvent.SOURCE_SYSTEM_MISSING: "ask_for_source_system",
-                TriageEvent.DIAGNOSTIC_EVIDENCE_MISSING: "ask_for_evidence",
-            }.get(event, "ask_for_missing_context"),
-            comment=_clarification_comment(context_missing),
-            confidence=0.9,
-        )
-        reason = "Minimum viable context is not satisfied."
-        return TriageOutput(
-            issue_id=ticket.issue_id,
-            phase=TriagePhase.CONTEXT_VALIDATION,
-            state=TriageState.MISSING_INFO.value,
-            last_event=event,
-            allowed_next_events=_allowed_next_events(TriageState.MISSING_INFO),
+    route_decision = route_ticket(
+        RouteContext(
+            ticket=ticket,
             primary_category=PrimaryCategory.APPLICATION_ISSUE,
             subcategory=ApplicationIssueSubcategory.DATA_QUALITY_ISSUE,
-            extracted_entities=entities,
-            missing_fields=context_missing,
-            duplicate_candidates=[],
-            recommended_action=action,
-            confidence=round((classification_confidence + action.confidence) / 2, 3),
-            audit_evidence=[reason],
-            audit=_audit(
-                event=event,
-                from_state=TriageState.EXTRACTING_CONTEXT,
-                to_state=TriageState.MISSING_INFO,
-                action_type=action_type,
-                rule_id="data_quality.minimum_viable_context",
-                reason=reason,
-            ),
+            entities=entities,
+            classification_confidence=classification_confidence,
         )
-
-    deflection = _data_quality_deflection(text)
-    if deflection:
-        event, action_type, reason = deflection
-        action = RecommendedAction(
-            action_type=action_type,
-            state=TriageState.INTENDED_BEHAVIOR.value,
-            team="app-support-triage",
-            comment_template=action_type.value,
-            comment=(
-                f"{reason} Draft a response explaining the expected behavior and "
-                "ask the reporter to confirm whether this resolves the ticket."
-            ),
-            confidence=0.84,
-        )
-        return TriageOutput(
-            issue_id=ticket.issue_id,
-            phase=TriagePhase.DEFLECTION,
-            state=TriageState.INTENDED_BEHAVIOR.value,
-            last_event=event,
-            allowed_next_events=[TriageEvent.EXPLANATION_SENT, TriageEvent.HUMAN_OVERRIDE],
-            primary_category=PrimaryCategory.APPLICATION_ISSUE,
-            subcategory=ApplicationIssueSubcategory.DATA_QUALITY_ISSUE,
-            extracted_entities=entities,
-            missing_fields=[],
-            duplicate_candidates=[],
-            recommended_action=action,
-            confidence=round((classification_confidence + action.confidence) / 2, 3),
-            audit_evidence=[reason],
-            audit=_audit(
-                event=event,
-                from_state=TriageState.CHECKING_KNOWN_BEHAVIOR,
-                to_state=TriageState.INTENDED_BEHAVIOR,
-                action_type=action_type,
-                rule_id="data_quality.known_behavior_deflection",
-                reason=reason,
-            ),
-        )
-
-    state, event, action_type, team, reason = _data_quality_route(text)
-    action = RecommendedAction(
-        action_type=action_type,
-        state=state.value,
-        team=team,
-        comment_template=action_type.value,
-        comment=reason,
-        confidence=0.82 if state != TriageState.HUMAN_REVIEW else 0.64,
     )
+    if route_decision is None:
+        raise RuntimeError("No route module registered for data_quality_issue.")
+
     return TriageOutput(
         issue_id=ticket.issue_id,
-        phase=TriagePhase.ROUTING if state != TriageState.HUMAN_REVIEW else TriagePhase.EXCEPTION,
-        state=state.value,
-        last_event=event,
-        allowed_next_events=_allowed_next_events(state),
+        phase=route_decision.phase,
+        state=route_decision.state.value,
+        last_event=route_decision.last_event,
+        allowed_next_events=_allowed_next_events(route_decision.state),
         primary_category=PrimaryCategory.APPLICATION_ISSUE,
         subcategory=ApplicationIssueSubcategory.DATA_QUALITY_ISSUE,
         extracted_entities=entities,
-        missing_fields=[],
+        missing_fields=route_decision.missing_fields,
         duplicate_candidates=[],
-        recommended_action=action,
-        confidence=round((classification_confidence + action.confidence) / 2, 3),
-        audit_evidence=["Minimum viable context is satisfied.", reason],
-        audit=_audit(
-            event=event,
-            from_state=TriageState.ROUTING_REVIEW,
-            to_state=state,
-            action_type=action_type,
-            rule_id="data_quality.routing",
-            reason=reason,
-        ),
+        recommended_action=route_decision.recommended_action,
+        confidence=round((classification_confidence + route_decision.confidence) / 2, 3),
+        audit_evidence=route_decision.audit_evidence,
+        audit=route_decision.audit,
+        module_path=route_decision.module_path,
+        module_state=route_decision.module_state,
+        route_target=route_decision.route_target,
+        route_rule_id=route_decision.route_rule_id,
+        deflection_rule_id=route_decision.deflection_rule_id,
     )
 
 
