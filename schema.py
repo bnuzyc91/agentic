@@ -140,16 +140,22 @@ class ActionType(str, Enum):
 
 
 class TemplateProposalType(str, Enum):
+    # Hierarchy evolution — primary proposal types
+    ADD_RULEBOOK_RULE = "add_rulebook_rule"       # strengthen keywords for an existing leaf
+    ADD_LEAF_NODE = "add_leaf_node"               # new issue type under an existing team
+    ADD_TEAM_NODE = "add_team_node"               # new routing team (rare)
+    # Secondary / fine-tuning proposals
+    ADD_CLARIFICATION_TEXT = "add_clarification_text"
+    CHANGE_ROUTING_HINT = "change_routing_hint"
+    ADD_TRANSITION_RULE = "add_transition_rule"
+    IMPROVE_DUPLICATE_EVIDENCE = "improve_duplicate_evidence"
+    # Legacy — kept for backward compat with existing evolution proposals
     ADD_PRIMARY_CATEGORY = "add_primary_category"
     ADD_APPLICATION_ISSUE_SUBCATEGORY = "add_application_issue_subcategory"
     ADD_STATE = "add_state"
     ADD_EVENT = "add_event"
     ADD_ACTION_TYPE = "add_action_type"
-    ADD_TRANSITION_RULE = "add_transition_rule"
     ADD_REQUIRED_ENTITY = "add_required_entity"
-    CHANGE_ROUTING_HINT = "change_routing_hint"
-    ADD_CLARIFICATION_TEXT = "add_clarification_text"
-    IMPROVE_DUPLICATE_EVIDENCE = "improve_duplicate_evidence"
 
 
 class Comment(BaseModel):

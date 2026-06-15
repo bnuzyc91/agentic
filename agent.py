@@ -5,27 +5,23 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from ticket_triage.domain.classification import classify_ticket as _classify_ticket
 from ticket_triage.domain.duplicates import find_similar_tickets as _find_similar_tickets
 from ticket_triage.domain.evolution import propose_template_evolution as _propose_template_evolution
 from ticket_triage.domain.extraction import extract_entities as _extract_entities
-from ticket_triage.domain.loading import dump_model, load_state_machine
+from ticket_triage.domain.hierarchy.registry import traverse as _traverse
+from ticket_triage.domain.loading import dump_model
 from ticket_triage.domain.recommendation import (
     evaluate_required_fields as _evaluate_required_fields,
     recommend_next_action as _recommend_next_action,
     triage_ticket as _triage_ticket,
 )
+from ticket_triage.domain.parsing import coerce_ticket as _coerce_ticket
+from ticket_triage.schema import HierarchyClassification
 
 try:
     from google.adk.agents import Agent
 except ImportError:  # pragma: no cover - exercised only when ADK is not installed.
     Agent = None  # type: ignore[assignment]
-
-
-def load_state_machine_template() -> dict[str, Any]:
-    """Load the versioned JSON state/action template validated by schema.py."""
-
-    return dump_model(load_state_machine())
 
 
 def extract_ticket_entities(ticket: dict[str, Any]) -> dict[str, Any]:
@@ -34,10 +30,16 @@ def extract_ticket_entities(ticket: dict[str, Any]) -> dict[str, Any]:
     return dump_model(_extract_entities(ticket))
 
 
-def classify_ticket(ticket: dict[str, Any], entities: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Classify a ticket into primary category and optional application issue subcategory."""
+def classify_by_hierarchy(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Classify a ticket using the team → issue-type hierarchy tree.
 
-    return dump_model(_classify_ticket(ticket, entities))
+    Returns routing_team, issue_type, path, confidence, and evidence.
+    Use this instead of the old flat classifier.
+    """
+    parsed = _coerce_ticket(ticket)
+    entities = _extract_entities(parsed)
+    classification, _ = _traverse(parsed, entities)
+    return dump_model(classification)
 
 
 def find_similar_tickets(ticket: dict[str, Any]) -> list[dict[str, Any]]:
@@ -47,33 +49,49 @@ def find_similar_tickets(ticket: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def evaluate_required_fields(
-    primary_category: str,
-    subcategory: str | None,
+    routing_team: str,
+    issue_type: str,
     entities: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Return required fields missing for the selected category/subcategory."""
+    """Return required fields missing for the given team / issue-type leaf.
 
+    routing_team: one of data_engineering, finance_platform, app_support, unknown
+    issue_type:   leaf name (e.g. data_quality_issue, access_request)
+    """
+    from ticket_triage.schema import RoutingTeam
+    classification = HierarchyClassification(
+        routing_team=RoutingTeam(routing_team),
+        issue_type=issue_type,
+        confidence=1.0,
+    )
     return [
         dump_model(field)
-        for field in _evaluate_required_fields(primary_category, subcategory, entities)
+        for field in _evaluate_required_fields(classification, entities)
     ]
 
 
 def recommend_next_action(
     ticket: dict[str, Any],
-    primary_category: str,
-    subcategory: str | None,
+    routing_team: str,
+    issue_type: str,
     entities: dict[str, Any],
     missing_fields: list[dict[str, Any]],
     duplicates: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Recommend a next action as a copilot suggestion, not a live ticket mutation."""
+    """Recommend a next action as a copilot suggestion, not a live ticket mutation.
 
+    routing_team / issue_type should come from classify_by_hierarchy.
+    """
+    from ticket_triage.schema import RoutingTeam
+    classification = HierarchyClassification(
+        routing_team=RoutingTeam(routing_team),
+        issue_type=issue_type,
+        confidence=1.0,
+    )
     return dump_model(
         _recommend_next_action(
             ticket,
-            primary_category,
-            subcategory,
+            classification,
             entities,
             missing_fields,
             duplicates,
@@ -94,9 +112,8 @@ def triage_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
 
 
 TICKET_EXECUTOR_TOOLS = [
-    load_state_machine_template,
     extract_ticket_entities,
-    classify_ticket,
+    classify_by_hierarchy,
     find_similar_tickets,
     evaluate_required_fields,
     recommend_next_action,
@@ -104,7 +121,6 @@ TICKET_EXECUTOR_TOOLS = [
 ]
 
 TEMPLATE_EVOLUTION_TOOLS = [
-    load_state_machine_template,
     propose_template_evolution,
 ]
 
@@ -115,7 +131,10 @@ You are the ticket executor agent for an annual budget planning application.
 Use the provided tools to analyze tickets. Prefer the full triage_ticket tool when the
 user provides one ticket and wants a recommendation. Use the lower-level tools when
 the user asks to inspect classification, extracted entities, duplicate candidates,
-missing required fields, or the state/action template.
+missing required fields, or the routing recommendation.
+
+The classification hierarchy is: routing_team (actor) → issue_type (problem category).
+Teams: data_engineering, finance_platform, app_support.
 
 Explain recommendations in state-machine terms: phase, state, last_event,
 recommended_action.type, missing_fields, allowed_next_events, and audit rationale.

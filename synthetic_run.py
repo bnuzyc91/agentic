@@ -2,7 +2,7 @@ from ticket_triage.schema import Ticket
 from ticket_triage.domain.extraction import extract_entities
 from ticket_triage.domain.hierarchy.registry import traverse
 from ticket_triage.data.synthetic.generator import get_labelled_tickets
-
+# run the mock tickets
 for raw in get_labelled_tickets():
     ticket = Ticket(**{k: v for k, v in raw.items() if not k.startswith('_')})
     entities = extract_entities(ticket)

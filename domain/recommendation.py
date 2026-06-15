@@ -2,28 +2,59 @@
 
 from __future__ import annotations
 
-from ticket_triage.domain.classification import classify_ticket
 from ticket_triage.domain.duplicates import find_similar_tickets
 from ticket_triage.domain.extraction import extract_entities
-from ticket_triage.domain.loading import load_state_machine
+from ticket_triage.domain.hierarchy.registry import get_rulebook, traverse
 from ticket_triage.domain.parsing import coerce_ticket
-from ticket_triage.domain.routing import RouteContext, route_ticket
 from ticket_triage.schema import (
     ActionType,
     ApplicationIssueSubcategory,
     AuditEntry,
     DuplicateCandidate,
     ExtractedEntities,
+    HierarchyClassification,
     MissingField,
     PrimaryCategory,
     RecommendedAction,
-    StateMachineTemplate,
+    RoutingTeam,
     Ticket,
     TriageEvent,
     TriageOutput,
     TriagePhase,
     TriageState,
 )
+
+# Maps hierarchy leaf → (PrimaryCategory, subcategory) for backward-compat TriageOutput fields.
+_HIERARCHY_TO_PRIMARY: dict[
+    tuple[str, str], tuple[PrimaryCategory, ApplicationIssueSubcategory | None]
+] = {
+    ("app_support", "access_request"): (PrimaryCategory.ACCESS_REQUEST, None),
+    ("app_support", "integration_issue"): (
+        PrimaryCategory.APPLICATION_ISSUE, ApplicationIssueSubcategory.INTEGRATION_ISSUE,
+    ),
+    ("app_support", "ui_workflow_issue"): (
+        PrimaryCategory.APPLICATION_ISSUE, ApplicationIssueSubcategory.UI_WORKFLOW_ISSUE,
+    ),
+    ("finance_platform", "budget_variance_issue"): (
+        PrimaryCategory.APPLICATION_ISSUE, ApplicationIssueSubcategory.BUDGET_VARIANCE_ISSUE,
+    ),
+    ("finance_platform", "report_performance_issue"): (
+        PrimaryCategory.APPLICATION_ISSUE, ApplicationIssueSubcategory.REPORT_PERFORMANCE_ISSUE,
+    ),
+    ("finance_platform", "forecast_discrepancy"): (PrimaryCategory.APPLICATION_ISSUE, None),
+    ("data_engineering", "data_quality_issue"): (
+        PrimaryCategory.APPLICATION_ISSUE, ApplicationIssueSubcategory.DATA_QUALITY_ISSUE,
+    ),
+    ("data_engineering", "pipeline_failure"): (PrimaryCategory.APPLICATION_ISSUE, None),
+    ("data_engineering", "schema_change"): (PrimaryCategory.APPLICATION_ISSUE, None),
+}
+
+
+def _to_primary(
+    classification: HierarchyClassification,
+) -> tuple[PrimaryCategory, ApplicationIssueSubcategory | None]:
+    key = (classification.routing_team.value, classification.issue_type)
+    return _HIERARCHY_TO_PRIMARY.get(key, (PrimaryCategory.OTHER_OR_UNKNOWN, None))
 
 
 def _is_missing(entities: ExtractedEntities, field: str) -> bool:
@@ -36,32 +67,20 @@ def _is_missing(entities: ExtractedEntities, field: str) -> bool:
 
 
 def evaluate_required_fields(
-    primary_category: PrimaryCategory | str,
-    subcategory: ApplicationIssueSubcategory | str | None,
+    classification: HierarchyClassification,
     entities: ExtractedEntities | dict,
-    template: StateMachineTemplate | None = None,
 ) -> list[MissingField]:
-    """Evaluate required fields from primary and subcategory templates."""
-
-    parsed_template = template or load_state_machine()
+    """Return required fields missing for the matched hierarchy leaf."""
     parsed_entities = (
         ExtractedEntities.model_validate(entities) if isinstance(entities, dict) else entities
     )
-    parsed_category = PrimaryCategory(primary_category)
-    parsed_subcategory = ApplicationIssueSubcategory(subcategory) if subcategory else None
-
-    rules = list(parsed_template.primary_categories[parsed_category].required_fields)
-    if parsed_category == PrimaryCategory.APPLICATION_ISSUE and parsed_subcategory:
-        rules.extend(
-            parsed_template.application_issue_subcategories[parsed_subcategory].required_fields
-        )
-
+    rulebook = get_rulebook(classification.routing_team, classification.issue_type)
+    if rulebook is None:
+        return []
     missing: list[MissingField] = []
-    for rule in rules:
+    for rule in rulebook.required_fields:
         if _is_missing(parsed_entities, rule.field):
-            missing.append(
-                MissingField(field=rule.field, label=rule.label, prompt=rule.prompt)
-            )
+            missing.append(MissingField(field=rule.field, label=rule.label, prompt=rule.prompt))
     return missing
 
 
@@ -147,22 +166,20 @@ def _audit(
 
 def recommend_next_action(
     ticket: str | dict | Ticket,
-    primary_category: PrimaryCategory | str,
-    subcategory: ApplicationIssueSubcategory | str | None,
+    classification: HierarchyClassification,
     entities: ExtractedEntities | dict,
     missing_fields: list[MissingField] | list[dict],
     duplicates: list[DuplicateCandidate] | list[dict],
-    template: StateMachineTemplate | None = None,
 ) -> RecommendedAction:
-    """Recommend the next copilot action. V1 always requires human review."""
-
-    parsed_template = template or load_state_machine()
-    parsed_category = PrimaryCategory(primary_category)
-    parsed_subcategory = ApplicationIssueSubcategory(subcategory) if subcategory else None
+    """Recommend the next copilot action based on hierarchy classification."""
     parsed_missing = [MissingField.model_validate(item) for item in missing_fields]
     parsed_duplicates = [DuplicateCandidate.model_validate(item) for item in duplicates]
 
-    strong_duplicate = parsed_duplicates[0] if parsed_duplicates and parsed_duplicates[0].score >= 0.74 else None
+    strong_duplicate = (
+        parsed_duplicates[0]
+        if parsed_duplicates and parsed_duplicates[0].score >= 0.74
+        else None
+    )
     if strong_duplicate:
         return RecommendedAction(
             action_type=ActionType.SUGGEST_DUPLICATE_REVIEW,
@@ -186,136 +203,79 @@ def recommend_next_action(
             confidence=0.88,
         )
 
-    if parsed_category == PrimaryCategory.INTENDED_BEHAVIOR:
-        return RecommendedAction(
-            action_type=ActionType.EXPLAIN_INTENDED_BEHAVIOR,
-            state=TriageState.INTENDED_BEHAVIOR.value,
-            team="app-support-triage",
-            comment_template="explain_intended_behavior",
-            comment=(
-                "This appears to be expected application behavior. Draft a support "
-                "reply explaining the intended behavior and offer to open a feature "
-                "request if the workflow should change."
-            ),
-            confidence=0.84,
-        )
-
-    if parsed_category == PrimaryCategory.FEATURE_REQUEST:
-        hint = parsed_template.primary_categories[parsed_category].routing_hint
-        return RecommendedAction(
-            action_type=ActionType.PRODUCT_REVIEW,
-            state=TriageState.ROUTED_PRODUCT_REVIEW.value,
-            team=hint.team if hint else "product-owner-review",
-            comment_template="route_to_product_review",
-            comment=(
-                "This appears to be a feature request. Route to product owner review "
-                "with the requested capability, business reason, and urgency."
-            ),
-            confidence=0.82,
-        )
-
-    if parsed_category == PrimaryCategory.APPLICATION_ISSUE and parsed_subcategory:
-        hint = parsed_template.application_issue_subcategories[parsed_subcategory].routing_hint
+    rulebook = get_rulebook(classification.routing_team, classification.issue_type)
+    if rulebook is not None:
+        hint = rulebook.routing_hint
         return RecommendedAction(
             action_type=ActionType.ROUTE_TO_TEAM,
-            state=TriageState.ROUTED_APPLICATION_SUPPORT.value,
-            team=hint.team if hint else "app-support-triage",
-            comment_template="route_application_issue",
+            state=TriageState.ROUTED_TO_TEAM.value,
+            team=hint.team,
+            comment_template="route_to_team",
             comment=(
-                f"This is an application issue classified as {parsed_subcategory.value}. "
-                f"Route to {hint.team if hint else 'app-support-triage'} for investigation."
+                f"Classified as {classification.routing_team.value}/{classification.issue_type}. "
+                f"Route to {hint.team}: {hint.reason}"
             ),
-            confidence=0.83,
+            confidence=round(classification.confidence, 3),
         )
 
-    hint = parsed_template.primary_categories[parsed_category].routing_hint
     return RecommendedAction(
-        action_type=ActionType.ROUTE_TO_TEAM if hint else ActionType.HUMAN_REVIEW,
+        action_type=ActionType.HUMAN_REVIEW,
         state=TriageState.HUMAN_REVIEW.value,
-        team=hint.team if hint else "app-support-triage",
+        team="app-support-triage",
         comment_template="route_or_review",
         comment=(
-            f"This ticket is classified as {parsed_category.value}. "
-            f"Route to {hint.team if hint else 'app-support-triage'} for human review."
+            f"Classification unclear (team: {classification.routing_team.value}). "
+            "Route to app-support-triage for human review."
         ),
         confidence=0.78,
     )
 
 
-def _triage_data_quality_ticket(
-    ticket: Ticket,
-    entities: ExtractedEntities,
-    classification_confidence: float,
-) -> TriageOutput:
-    route_decision = route_ticket(
-        RouteContext(
-            ticket=ticket,
-            primary_category=PrimaryCategory.APPLICATION_ISSUE,
-            subcategory=ApplicationIssueSubcategory.DATA_QUALITY_ISSUE,
-            entities=entities,
-            classification_confidence=classification_confidence,
-        )
-    )
-    if route_decision is None:
-        raise RuntimeError("No route module registered for data_quality_issue.")
-
-    return TriageOutput(
-        issue_id=ticket.issue_id,
-        phase=route_decision.phase,
-        state=route_decision.state.value,
-        last_event=route_decision.last_event,
-        allowed_next_events=_allowed_next_events(route_decision.state),
-        primary_category=PrimaryCategory.APPLICATION_ISSUE,
-        subcategory=ApplicationIssueSubcategory.DATA_QUALITY_ISSUE,
-        extracted_entities=entities,
-        missing_fields=route_decision.missing_fields,
-        duplicate_candidates=[],
-        recommended_action=route_decision.recommended_action,
-        confidence=round((classification_confidence + route_decision.confidence) / 2, 3),
-        audit_evidence=route_decision.audit_evidence,
-        audit=route_decision.audit,
-        module_path=route_decision.module_path,
-        module_state=route_decision.module_state,
-        route_target=route_decision.route_target,
-        route_rule_id=route_decision.route_rule_id,
-        deflection_rule_id=route_decision.deflection_rule_id,
-    )
-
-
 def triage_ticket(ticket: str | dict | Ticket) -> TriageOutput:
     """Run the deterministic triage pipeline for one ticket."""
-
     parsed_ticket = coerce_ticket(ticket)
-    template = load_state_machine()
     entities = extract_entities(parsed_ticket)
-    classification = classify_ticket(parsed_ticket, entities)
+    classification, route_decision = traverse(parsed_ticket, entities)
     duplicates = find_similar_tickets(parsed_ticket)
+    primary_category, subcategory = _to_primary(classification)
 
-    if (
-        classification.primary_category == PrimaryCategory.APPLICATION_ISSUE
-        and classification.subcategory == ApplicationIssueSubcategory.DATA_QUALITY_ISSUE
-    ):
-        return _triage_data_quality_ticket(
-            parsed_ticket,
-            entities,
-            classification.confidence,
+    # Leaves with internal state machines (e.g. DataQualityRouteModule) encode
+    # MISSING_INFO and INTENDED_BEHAVIOR themselves — honour their decision directly.
+    if route_decision is not None and route_decision.state in {
+        TriageState.MISSING_INFO,
+        TriageState.INTENDED_BEHAVIOR,
+    }:
+        evidence = list(classification.evidence) + list(route_decision.audit_evidence)
+        if duplicates:
+            evidence.append(
+                f"Top duplicate candidate: {duplicates[0].issue_id} ({duplicates[0].score:.2f})."
+            )
+        return TriageOutput(
+            issue_id=parsed_ticket.issue_id,
+            phase=route_decision.phase,
+            state=route_decision.state.value,
+            last_event=route_decision.last_event,
+            allowed_next_events=_allowed_next_events(route_decision.state),
+            primary_category=primary_category,
+            subcategory=subcategory,
+            extracted_entities=entities,
+            missing_fields=route_decision.missing_fields,
+            duplicate_candidates=duplicates,
+            recommended_action=route_decision.recommended_action,
+            confidence=round((classification.confidence + route_decision.confidence) / 2, 3),
+            audit_evidence=evidence,
+            audit=route_decision.audit,
+            module_path=route_decision.module_path,
+            module_state=route_decision.module_state,
+            route_target=route_decision.route_target,
+            route_rule_id=route_decision.route_rule_id,
+            deflection_rule_id=route_decision.deflection_rule_id,
         )
 
-    missing = evaluate_required_fields(
-        classification.primary_category,
-        classification.subcategory,
-        entities,
-        template,
-    )
-    action = recommend_next_action(
-        parsed_ticket,
-        classification.primary_category,
-        classification.subcategory,
-        entities,
-        missing,
-        duplicates,
-        template,
-    )
+    # Standard path: duplicates > missing fields > leaf route > human review
+    missing = evaluate_required_fields(classification, entities)
+    action = recommend_next_action(parsed_ticket, classification, entities, missing, duplicates)
+
     evidence = list(classification.evidence)
     phase = TriagePhase.EXCEPTION
     state = TriageState.HUMAN_REVIEW
@@ -331,27 +291,30 @@ def triage_ticket(ticket: str | dict | Ticket) -> TriageOutput:
         phase = TriagePhase.ROUTING
         state = TriageState.DUPLICATE_REVIEW
         event = TriageEvent.DUPLICATE_CANDIDATE_FOUND
-    elif classification.primary_category == PrimaryCategory.ACCESS_REQUEST:
+    elif (
+        classification.routing_team == RoutingTeam.APP_SUPPORT
+        and classification.issue_type == "access_request"
+    ):
         phase = TriagePhase.ROUTING
         state = TriageState.READY_FOR_ACCESS_REVIEW
         event = TriageEvent.REQUIRED_FIELDS_EXTRACTED
-    elif classification.primary_category == PrimaryCategory.FEATURE_REQUEST:
-        phase = TriagePhase.ROUTING
-        state = TriageState.ROUTED_PRODUCT_REVIEW
-        event = TriageEvent.ROUTING_UNCLEAR
-    elif classification.primary_category == PrimaryCategory.INTENDED_BEHAVIOR:
-        phase = TriagePhase.DEFLECTION
-        state = TriageState.INTENDED_BEHAVIOR
-        event = TriageEvent.KNOWN_BEHAVIOR_CHECK_STARTED
-    elif classification.primary_category == PrimaryCategory.APPLICATION_ISSUE:
-        phase = TriagePhase.ROUTING
-        state = TriageState.ROUTED_APPLICATION_SUPPORT
-        event = TriageEvent.KNOWN_BEHAVIOR_NOT_MATCHED
+    elif route_decision is not None:
+        phase = route_decision.phase
+        state = route_decision.state
+        event = route_decision.last_event or TriageEvent.ROUTE_MATCHED
+        from_state = TriageState.ROUTE_DECISION
 
     if duplicates:
-        evidence.append(f"Top duplicate candidate: {duplicates[0].issue_id} ({duplicates[0].score:.2f}).")
+        evidence.append(
+            f"Top duplicate candidate: {duplicates[0].issue_id} ({duplicates[0].score:.2f})."
+        )
     if missing:
-        evidence.append(f"Missing required fields: {', '.join(field.field for field in missing)}.")
+        evidence.append(f"Missing required fields: {', '.join(f.field for f in missing)}.")
+
+    module_path = route_decision.module_path if route_decision else []
+    module_state_val = route_decision.module_state if route_decision else None
+    route_target = route_decision.route_target if route_decision else None
+    route_rule_id = route_decision.route_rule_id if route_decision else None
 
     return TriageOutput(
         issue_id=parsed_ticket.issue_id,
@@ -359,8 +322,8 @@ def triage_ticket(ticket: str | dict | Ticket) -> TriageOutput:
         state=state.value,
         last_event=event,
         allowed_next_events=_allowed_next_events(state),
-        primary_category=classification.primary_category,
-        subcategory=classification.subcategory,
+        primary_category=primary_category,
+        subcategory=subcategory,
         extracted_entities=entities,
         missing_fields=missing,
         duplicate_candidates=duplicates,
@@ -372,7 +335,11 @@ def triage_ticket(ticket: str | dict | Ticket) -> TriageOutput:
             from_state=from_state,
             to_state=state,
             action_type=action.action_type,
-            rule_id=f"{classification.primary_category.value}.state_transition",
-            reason="Selected next state and action from the category rulebook.",
+            rule_id=f"{classification.routing_team.value}.{classification.issue_type}",
+            reason="Selected next state and action from hierarchy rulebook.",
         ),
+        module_path=module_path,
+        module_state=module_state_val,
+        route_target=route_target,
+        route_rule_id=route_rule_id,
     )

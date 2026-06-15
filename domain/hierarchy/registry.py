@@ -11,7 +11,7 @@ Usage:
 
 from __future__ import annotations
 
-from ticket_triage.domain.hierarchy.base import ClassificationNode, InternalNode, LeafNode
+from ticket_triage.domain.hierarchy.base import ClassificationNode, InternalNode, LeafNode, Rulebook
 from ticket_triage.domain.hierarchy.nodes.app_support import AppSupportTeam
 from ticket_triage.domain.hierarchy.nodes.data_engineering import DataEngineeringTeam
 from ticket_triage.domain.hierarchy.nodes.finance_platform import FinancePlatformTeam
@@ -42,6 +42,17 @@ class RootNode(InternalNode):
 
     def matches(self, ticket: Ticket, entities: ExtractedEntities) -> float:
         return 1.0
+
+
+def get_rulebook(routing_team: RoutingTeam | str, issue_type: str) -> Rulebook | None:
+    """Return the Rulebook for a specific team + issue type, or None if not found."""
+    team_name = routing_team.value if isinstance(routing_team, RoutingTeam) else routing_team
+    for team_node in RootNode().children:
+        if team_node.name == team_name and isinstance(team_node, InternalNode):
+            for leaf in team_node.children:
+                if leaf.name == issue_type and isinstance(leaf, LeafNode):
+                    return leaf.rulebook
+    return None
 
 
 def traverse(
