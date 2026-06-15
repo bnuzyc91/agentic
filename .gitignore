@@ -1,0 +1,23 @@
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.VolumeIcon.icns
+
+# Python compiled files and environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Development Tools & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
